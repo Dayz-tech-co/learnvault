@@ -1,0 +1,17 @@
+[
+  {
+    "name": "Main App Bundle",
+    "path": "dist/assets/index-*.js",
+    "limit": "150 kB"
+  },
+  {
+    "name": "Framework Chunk",
+    "path": "dist/assets/framework-*.js",
+    "limit": "200 kB"
+  },
+  {
+    "name": "CSS Assets",
+    "path": "dist/assets/*.css",
+    "limit": "50 kB"
+  }
+]

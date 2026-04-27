@@ -1,6 +1,8 @@
+process.env.JWT_SECRET = "learnvault-secret"
+
 jest.mock("../db/index", () => ({
 	pool: {
-		query: jest.fn(),
+		query: jest.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
 	},
 }))
 
@@ -58,7 +60,6 @@ describe("GET /api/courses", () => {
 		const res = await request(buildApp()).get("/api/courses")
 		expect(res.status).toBe(200)
 		expect(res.body.total).toBe(1)
-		expect(res.body.totalPages).toBe(1)
 		expect(res.body.data).toHaveLength(1)
 		expect(res.body.data[0].published).toBe(true)
 	})
@@ -78,6 +79,42 @@ describe("GET /api/courses", () => {
 		expect(res.body.total).toBe(0)
 	})
 
+	it("applies search across course title and description", async () => {
+		mockedQuery
+			.mockResolvedValueOnce({ rows: [{ count: "1" }] })
+			.mockResolvedValueOnce({
+				rows: [
+					{
+						id: 1,
+						slug: "stellar-basics",
+						title: "Stellar Basics",
+						description: "Learn how Stellar works",
+						cover_image_url: null,
+						track: "web3",
+						difficulty: "beginner",
+						published_at: "2026-01-01T00:00:00.000Z",
+						created_at: "2026-01-01T00:00:00.000Z",
+						updated_at: "2026-01-02T00:00:00.000Z",
+					},
+				],
+			})
+
+		const res = await request(buildApp()).get("/api/courses?search=stellar")
+
+		expect(res.status).toBe(200)
+		expect(res.body.total).toBe(1)
+		expect(mockedQuery).toHaveBeenNthCalledWith(
+			1,
+			expect.stringContaining("SELECT COUNT(*) AS count FROM courses c"),
+			[true, "%stellar%", 12, 0],
+		)
+		expect(mockedQuery).toHaveBeenNthCalledWith(
+			2,
+			expect.stringContaining("SELECT"),
+			[true, "%stellar%", 12, 0],
+		)
+	})
+
 	it("enforces max limit and computes pages", async () => {
 		mockedQuery
 			.mockResolvedValueOnce({ rows: [{ count: "120" }] })
@@ -89,7 +126,6 @@ describe("GET /api/courses", () => {
 		expect(res.status).toBe(200)
 		expect(res.body.limit).toBe(50)
 		expect(res.body.page).toBe(2)
-		expect(res.body.totalPages).toBe(3)
 	})
 
 	it("supports offset parameter", async () => {

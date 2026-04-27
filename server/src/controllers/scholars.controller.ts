@@ -1,7 +1,11 @@
 import { type Request, type Response } from "express"
 
+import { logger } from "../lib/logger"
 import { pool } from "../db/index"
+
+const log = logger.child({ module: "scholars" })
 import { milestoneStore } from "../db/milestone-store"
+import { listEscrowTimeoutsForScholar } from "../services/escrow-timeout.service"
 import { stellarContractService } from "../services/stellar-contract.service"
 
 type ApiMilestoneStatus = "pending" | "verified" | "rejected"
@@ -44,45 +48,74 @@ export async function getScholarMilestones(
 	const address = req.params.address
 	const courseId =
 		typeof req.query.course_id === "string" ? req.query.course_id : undefined
-	const internalStatus = mapQueryStatus(
-		typeof req.query.status === "string" ? req.query.status : undefined,
-	)
+	const rawStatus =
+		typeof req.query.status === "string" ? req.query.status : undefined
+	const internalStatus = mapQueryStatus(rawStatus)
+
+	if (rawStatus && !internalStatus) {
+		res.status(400).json({ error: "Validation failed" })
+		return
+	}
 
 	try {
 		const reports = await milestoneStore.getReportsForScholar(address, {
 			courseId,
 			status: internalStatus,
 		})
+		const reportIds = reports.map((report) => report.id)
+		let lastDecisionByReportId: Record<
+			number,
+			{ decided_at: unknown; contract_tx_hash: string | null }
+		> = {}
 
-		const milestones = await Promise.all(
-			reports.map(async (report) => {
-				const auditLog = await milestoneStore.getAuditForReport(report.id)
-				const lastDecision = auditLog.at(-1)
+		if (reportIds.length > 0) {
+			const auditResult = await pool.query(
+				`SELECT DISTINCT ON (report_id)
+					report_id,
+					decided_at,
+					contract_tx_hash
+				 FROM milestone_audit_log
+				 WHERE report_id = ANY($1::int[])
+				 ORDER BY report_id, decided_at DESC`,
+				[reportIds],
+			)
+			lastDecisionByReportId = Object.fromEntries(
+				(auditResult?.rows ?? []).map((row) => [
+					Number(row.report_id),
+					{
+						decided_at: row.decided_at,
+						contract_tx_hash:
+							typeof row.contract_tx_hash === "string"
+								? row.contract_tx_hash
+								: null,
+					},
+				]),
+			)
+		}
 
-				const evidenceUrl =
-					report.evidence_github ??
-					(report.evidence_ipfs_cid
-						? `ipfs://${report.evidence_ipfs_cid}`
-						: null)
+		const milestones = reports.map((report) => {
+			const lastDecision = lastDecisionByReportId[report.id]
+			const evidenceUrl =
+				report.evidence_github ??
+				(report.evidence_ipfs_cid ? `ipfs://${report.evidence_ipfs_cid}` : null)
 
-				return {
-					id: String(report.id),
-					course_id: report.course_id,
-					milestone_id: report.milestone_id,
-					status: mapInternalStatus(report.status),
-					evidence_url: evidenceUrl,
-					submitted_at: toIsoDateTime(report.submitted_at),
-					verified_at: lastDecision
-						? toIsoDateTime(lastDecision.decided_at)
-						: null,
-					tx_hash: lastDecision?.contract_tx_hash ?? null,
-				}
-			}),
-		)
+			return {
+				id: String(report.id),
+				course_id: report.course_id,
+				milestone_id: report.milestone_id,
+				status: mapInternalStatus(report.status),
+				evidence_url: evidenceUrl,
+				submitted_at: toIsoDateTime(report.submitted_at),
+				verified_at: lastDecision
+					? toIsoDateTime(lastDecision.decided_at)
+					: null,
+				tx_hash: lastDecision?.contract_tx_hash ?? null,
+			}
+		})
 
 		res.status(200).json({ milestones })
 	} catch (err) {
-		console.error("[scholars] getScholarMilestones error:", err)
+		log.error({ err }, "getScholarMilestones error")
 		res.status(500).json({ error: "Failed to fetch scholar milestones" })
 	}
 }
@@ -117,7 +150,7 @@ export async function getScholarsLeaderboard(
 		const rankingsValues = [...whereValues, limit, offset]
 		const rankingsResult = await pool.query(
 			`SELECT
-				ROW_NUMBER() OVER (ORDER BY lrn_balance DESC, address ASC) + $${whereValues.length + 2} AS rank,
+				ROW_NUMBER() OVER (ORDER BY lrn_balance DESC, address ASC) AS rank,
 				address,
 				lrn_balance,
 				courses_completed
@@ -205,7 +238,47 @@ export async function getScholarProfile(
 			joined_at: joinedAt,
 		})
 	} catch (error) {
-		console.error("[scholars] Error fetching scholar profile:", error)
+		log.error({ err: error }, "Error fetching scholar profile")
 		res.status(500).json({ error: "Failed to fetch scholar profile" })
+	}
+}
+
+export async function getScholarCredentials(
+	req: Request,
+	res: Response,
+): Promise<void> {
+	const { address } = req.params
+
+	if (!address) {
+		res.status(400).json({ error: "Scholar address is required" })
+		return
+	}
+
+	try {
+		const credentials =
+			await stellarContractService.getScholarCredentials(address)
+		res.status(200).json({ credentials })
+	} catch (error) {
+		log.error({ err: error }, "Error fetching scholar credentials")
+		res.status(500).json({ error: "Failed to fetch scholar credentials" })
+	}
+}
+
+export async function getScholarEscrowTimeouts(
+	req: Request,
+	res: Response,
+): Promise<void> {
+	const { address } = req.params
+	if (!address) {
+		res.status(400).json({ error: "Scholar address is required" })
+		return
+	}
+
+	try {
+		const escrows = await listEscrowTimeoutsForScholar(address)
+		res.status(200).json({ escrows })
+	} catch (error) {
+		console.error("[scholars] Error fetching escrow timeout status:", error)
+		res.status(500).json({ error: "Failed to fetch escrow timeout status" })
 	}
 }
